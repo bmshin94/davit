@@ -70,7 +70,7 @@ jobs:
           # release job does not build, so carry them rather than re-resolving.
           ditto -c -k --keepParent .build/artifacts/sparkle/Sparkle/bin handoff/sparkle-tools.zip
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: unsigned-bundle
           path: handoff/
@@ -89,7 +89,10 @@ jobs:
         with:
           xcode-version: latest-stable
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      # v8 defaults `digest-mismatch` to error rather than warn. That matters
+      # here specifically: this job signs and notarizes a bundle it did not
+      # build, so a corrupted handoff should fail loudly, not get a signature.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: unsigned-bundle
           path: handoff
