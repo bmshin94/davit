@@ -19,11 +19,19 @@ env:
   HAS_SIGNING: ${{ secrets.MACOS_CERT_P12 != '' }}
   # Enables the Homebrew tap bump after release.
   HAS_TAP: ${{ secrets.TAP_PUSH_TOKEN != '' }}
-  # Enables publishing the update appcast to davit.app after release.
+  # Enables publishing the legacy appcast.json to davit.app after release.
   HAS_GCS: ${{ secrets.GCS_SA_KEY != '' }}
+  # Enables signing the Sparkle appcast. Without it the release still publishes,
+  # but no Sparkle client will accept the update.
+  HAS_SPARKLE: ${{ secrets.SPARKLE_PRIVATE_KEY != '' }}
 
 jobs:
-  release:
+  # Compiles. Holds no credentials of any kind, deliberately: `swift build`
+  # resolves and compiles apple/container, containerization, swift-nio, Yams and
+  # their transitive tree, and runs five SwiftPM build plugins, all of which
+  # execute arbitrary code. Scoping secrets to steps is not enough when the
+  # untrusted code is in the same job, so the signing keys live in `release`.
+  build:
     # Apple silicon runner; the apple/container dependency needs Swift 6.2+
     runs-on: macos-15
     steps:
@@ -46,6 +54,54 @@ jobs:
           key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
           restore-keys: spm-${{ runner.os }}-
 
+      - name: Build app bundle without release secrets
+        run: |
+          export VERSION="${GITHUB_REF_NAME#v}"
+          scripts/bundle.sh   # CODESIGN_IDENTITY unset -> ad-hoc; release job re-signs
+
+      - name: Package the bundle and the Sparkle tools
+        run: |
+          # ditto, not upload-artifact on the .app: Sparkle.framework is a
+          # versioned bundle of symlinks, and the artifact upload flattens them,
+          # which breaks `codesign --verify --deep` only at install time.
+          mkdir -p handoff
+          ditto -c -k --sequesterRsrc --keepParent dist/Davit.app handoff/Davit-unsigned.zip
+          # generate_appcast and sign_update ship in the SPM artifact bundle. The
+          # release job does not build, so carry them rather than re-resolving.
+          ditto -c -k --keepParent .build/artifacts/sparkle/Sparkle/bin handoff/sparkle-tools.zip
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unsigned-bundle
+          path: handoff/
+          retention-days: 1
+
+  # Holds every credential. Runs no build: it unpacks what `build` produced,
+  # signs it, notarizes it, and publishes.
+  release:
+    needs: build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Select latest Xcode
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+        with:
+          xcode-version: latest-stable
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: unsigned-bundle
+          path: handoff
+
+      - name: Unpack the bundle and tools
+        run: |
+          mkdir -p dist "$RUNNER_TEMP/sparkle-tools"
+          ditto -x -k handoff/Davit-unsigned.zip dist
+          ditto -x -k handoff/sparkle-tools.zip "$RUNNER_TEMP/sparkle-tools"
+          test -d dist/Davit.app
+          test -x "$RUNNER_TEMP/sparkle-tools/bin/generate_appcast"
+
       - name: Import signing certificate
         if: env.HAS_SIGNING == 'true'
         env:
@@ -63,19 +119,13 @@ jobs:
           security list-keychains -d user -s build.keychain-db login.keychain-db
           IDENTITY_LINE=$(security find-identity -v -p codesigning build.keychain-db \
             | grep "Developer ID Application" | head -1)
-          IDENTITY=$(echo "$IDENTITY_LINE" | sed -E 's/.*"(.+)"/\1/')
           FINGERPRINT=$(echo "$IDENTITY_LINE" \
             | sed -E 's/^[[:space:]]*[0-9]+\)[[:space:]]+([0-9A-F]+).*/\1/')
-          if [ -z "$IDENTITY" ]; then
-            echo "No Developer ID Application identity found in certificate" >&2
-            exit 1
-          fi
           # Two Developer ID certificates can carry an IDENTICAL common name, so
           # the name says nothing about which private key is about to sign. Pin
           # the fingerprint instead: exporting the wrong cert from Keychain
           # Access then fails the build loudly rather than shipping quietly.
-          # On rotation, update this to the new cert's SHA-1, which
-          # `security find-identity -v -p codesigning` prints.
+          # On rotation, update this and the copy in scripts/sign.sh.
           EXPECTED_CERT_SHA1="89AFE2B56FFCB7344A7600B5E38E97C68A544591"
           if [ "$FINGERPRINT" != "$EXPECTED_CERT_SHA1" ]; then
             echo "Signing certificate is not the expected one." >&2
@@ -83,13 +133,11 @@ jobs:
             echo "  imported: $FINGERPRINT" >&2
             exit 1
           fi
-          echo "CODESIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
-          echo "Using identity: $IDENTITY ($FINGERPRINT)"
+          echo "CODESIGN_IDENTITY=$FINGERPRINT" >> "$GITHUB_ENV"
+          echo "Using identity: $FINGERPRINT"
 
-      - name: Build app bundle
-        run: |
-          export VERSION="${GITHUB_REF_NAME#v}"
-          scripts/bundle.sh
+      - name: Sign
+        run: scripts/sign.sh dist/Davit.app
 
       - name: Notarize
         if: env.HAS_SIGNING == 'true'
@@ -98,49 +146,24 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: |
-          AUTH=(--apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD")
           ditto -c -k --keepParent "dist/Davit.app" "notarize.zip"
-
-          # Submit without --wait: a single long-lived poll session dies to
-          # transient runner network flakes. Poll with fresh connections instead.
-          SUBMIT=$(xcrun notarytool submit notarize.zip "${AUTH[@]}" --output-format json)
-          echo "$SUBMIT"
-          SUBMISSION_ID=$(echo "$SUBMIT" | jq -r '.id // empty')
-          if [ -z "$SUBMISSION_ID" ]; then
-            echo "Submission failed — no id returned" >&2
-            exit 1
-          fi
-
-          STATUS="In Progress"
-          DEADLINE=$((SECONDS + 3300))   # ~55 min
-          while [ $SECONDS -lt $DEADLINE ]; do
-            sleep 30
-            INFO=$(xcrun notarytool info "$SUBMISSION_ID" "${AUTH[@]}" --output-format json 2>&1) || {
-              echo "poll error (transient, retrying): $INFO"
-              continue
-            }
-            STATUS=$(echo "$INFO" | jq -r '.status // "unknown"')
-            echo "status: $STATUS ($((SECONDS / 60))m elapsed)"
-            [ "$STATUS" = "In Progress" ] || break
-          done
-
-          # Always fetch Apple's detailed log — it names the exact issues on rejection.
-          xcrun notarytool log "$SUBMISSION_ID" "${AUTH[@]}" || true
-
-          if [ "$STATUS" != "Accepted" ]; then
-            echo "Notarization not accepted (status: $STATUS)" >&2
-            exit 1
-          fi
-          xcrun stapler staple "dist/Davit.app"
+          scripts/notarize.sh notarize.zip dist/Davit.app
           rm notarize.zip
 
       - name: Zip app
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          ditto -c -k --keepParent "dist/Davit.app" "Davit-${VERSION}.zip"
-          shasum -a 256 "Davit-${VERSION}.zip" > "Davit-${VERSION}.zip.sha256"
+          # Its own directory: generate_appcast scans a folder, and must see the
+          # zip without the DMG.
+          mkdir -p dist/release
+          ditto -c -k --sequesterRsrc --keepParent "dist/Davit.app" "dist/release/Davit-${VERSION}.zip"
+          # Run from inside the directory so the checksum file names the archive,
+          # not a path — that is what users compare against.
+          ( cd dist/release && shasum -a 256 "Davit-${VERSION}.zip" > "Davit-${VERSION}.zip.sha256" )
+          cp "dist/release/Davit-${VERSION}.zip" "Davit-${VERSION}.zip"
+          cp "dist/release/Davit-${VERSION}.zip.sha256" "Davit-${VERSION}.zip.sha256"
 
-      # The zip stays the machine channel (in-app updater, Homebrew cask);
+      # The zip stays the machine channel (Sparkle, Homebrew cask);
       # the DMG is the human one — mount, drag Davit to Applications.
       - name: Build DMG
         run: |
@@ -163,6 +186,33 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           shasum -a 256 "Davit-${VERSION}.dmg" > "Davit-${VERSION}.dmg.sha256"
+
+      - name: Sign the Sparkle appcast
+        if: env.HAS_SPARKLE == 'true'
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          set +x
+          set -euo pipefail
+          : "${SPARKLE_PRIVATE_KEY:?Missing SPARKLE_PRIVATE_KEY}"
+          VERSION="${GITHUB_REF_NAME#v}"
+          # The key goes in on stdin and is stripped from the tool's own
+          # environment, so it is never readable from /proc or a crash dump.
+          printf '%s' "$SPARKLE_PRIVATE_KEY" |
+            env -u SPARKLE_PRIVATE_KEY "$RUNNER_TEMP/sparkle-tools/bin/generate_appcast" \
+              --ed-key-file - \
+              --download-url-prefix "https://github.com/wouterdebie/davit/releases/download/${GITHUB_REF_NAME}/" \
+              --maximum-deltas 0 \
+              dist/release
+          test -s dist/release/appcast.xml
+          # Verify what we just produced rather than trusting the exit code: a
+          # missing signature would publish an appcast no client can accept.
+          SIGNATURE="$(xmllint --xpath 'string(/rss/channel/item/enclosure/@*[local-name()="edSignature"])' dist/release/appcast.xml)"
+          test -n "$SIGNATURE"
+          printf '%s' "$SPARKLE_PRIVATE_KEY" |
+            env -u SPARKLE_PRIVATE_KEY "$RUNNER_TEMP/sparkle-tools/bin/sign_update" \
+              --ed-key-file - --verify "dist/release/Davit-${VERSION}.zip" "$SIGNATURE"
+          cp dist/release/appcast.xml appcast.xml
 
       - name: Write release notes
         run: |
@@ -204,6 +254,7 @@ jobs:
             Davit-*.dmg.sha256
             Davit-*.zip
             Davit-*.zip.sha256
+            appcast.xml
           generate_release_notes: true
           body_path: RELEASE_NOTES.md
 
@@ -219,7 +270,12 @@ jobs:
         if: env.HAS_GCS == 'true'
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
 
-      - name: Publish appcast to davit.app
+      # The legacy feed, kept for clients older than the Sparkle switchover.
+      # Anyone on <= 0.1.33 polls this and knows nothing about appcast.xml; drop
+      # it and they never learn another version exists. They take one more update
+      # through the old path, land on a Sparkle build, and switch feeds for good.
+      # Safe to retire once nobody is plausibly still on an older build.
+      - name: Publish legacy appcast.json to davit.app
         if: env.HAS_GCS == 'true'
         run: |
           VERSION="${GITHUB_REF_NAME#v}"

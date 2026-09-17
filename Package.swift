@@ -13,6 +13,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-log.git", from: "1.0.0"),
         .package(url: "https://github.com/jpsim/Yams.git", from: "6.2.1"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.80.0"),
+        // Matches Don't Miss: one updater mechanism across both apps.
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
     ],
     targets: [
         .executableTarget(
@@ -26,6 +28,7 @@ let package = Package(
                 .product(name: "ContainerizationExtras", package: "containerization"),
                 .product(name: "ContainerizationOCI", package: "containerization"),
                 .product(name: "ContainerizationOS", package: "containerization"),
+                .product(name: "Sparkle", package: "Sparkle"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Yams", package: "Yams"),
@@ -36,7 +39,12 @@ let package = Package(
                 .product(name: "NIO", package: "swift-nio"),
             ],
             path: "Sources/ContainerStack",
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            swiftSettings: [.swiftLanguageMode(.v5)],
+            // Sparkle ships as a framework inside Contents/Frameworks, and
+            // SwiftPM does not add a loader path for it: without this the app
+            // builds and signs fine, then dies at launch with "Library not
+            // loaded: @rpath/Sparkle.framework". Same setting Don't Miss uses.
+            linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]
         )
     ]
 )

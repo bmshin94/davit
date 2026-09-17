@@ -17,7 +17,7 @@ swift build -c release
 
 echo "==> Assembling $APP"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 
 cp "$BUILD_DIR/ContainerStack" "$APP/Contents/MacOS/$APP_NAME"
 
@@ -38,6 +38,16 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSHumanReadableCopyright</key><string>UI for Apple's open-source container platform.</string>
+    <!-- Sparkle. The appcast ships as a release asset so the feed needs no
+         separate hosting; davit.app still serves the legacy appcast.json for
+         clients older than the Sparkle switchover. SUPublicEDKey is shared with
+         Don't Miss on purpose: one signing key, one mechanism. Sparkle reads
+         exactly one key and has no rotation path, so this value is permanent. -->
+    <key>SUFeedURL</key><string>https://github.com/wouterdebie/davit/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key><string>sQaiI9b/3VZCmzwNNRBCsDHm7uZ09UwG8ZdgtcVQkNQ=</string>
+    <key>SUEnableAutomaticChecks</key><true/>
+    <!-- 86400s, matching the daily cadence the previous updater used. -->
+    <key>SUScheduledCheckInterval</key><integer>86400</integer>
     <key>CFBundleURLTypes</key>
     <array>
       <dict>
@@ -48,6 +58,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+echo "==> Embedding Sparkle.framework"
+# ditto, not cp: the framework is a versioned bundle of symlinks, and a flattened
+# copy fails `codesign --verify --deep` in a way that only shows up at install.
+ditto "$BUILD_DIR/Sparkle.framework" "$APP/Contents/Frameworks/Sparkle.framework"
+cp "$ROOT/.build/artifacts/sparkle/Sparkle/LICENSE" "$APP/Contents/Resources/Sparkle-LICENSE.txt"
 
 echo "==> Installing app icon"
 # Committed artwork (icon/davit.svg is the master; regenerate with icon/regenerate.py).
@@ -68,12 +84,6 @@ if [ "${1:-}" = "--vendor" ]; then
   fi
 fi
 
-if [ -n "${CODESIGN_IDENTITY:-}" ]; then
-  echo "==> Codesigning with Developer ID (hardened runtime)"
-  codesign --force --options runtime --timestamp -s "$CODESIGN_IDENTITY" "$APP"
-else
-  echo "==> Codesigning (ad-hoc)"
-  codesign --force --deep -s - "$APP"
-fi
+bash "$ROOT/scripts/sign.sh" "$APP"
 
 echo "==> Done: $APP"

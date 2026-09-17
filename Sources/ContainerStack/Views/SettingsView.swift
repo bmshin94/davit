@@ -527,6 +527,7 @@ struct MemorySizeField: View {
 // MARK: - About
 
 struct AboutSettings: View {
+    @ObservedObject private var updates = UpdateController.shared
     @EnvironmentObject var state: AppState
 
     var body: some View {
@@ -541,18 +542,11 @@ struct AboutSettings: View {
             if case .running(let version) = state.systemState, let version {
                 Text(version).font(.caption).foregroundStyle(.tertiary)
             }
-            Text("Version \(UpdateChecker.currentVersion)")
+            Text("Version \(UpdateController.currentVersion)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Button("Check for Updates…") {
-                UserDefaults.standard.removeObject(forKey: UpdateChecker.skippedVersionKey)
-                state.checkForUpdates(force: true)
-            }
-            if let update = state.availableUpdate {
-                Text("Davit \(update.version) is available — see the Dashboard to install.")
-                    .font(.caption)
-                    .foregroundStyle(.tint)
-            }
+            Button("Check for Updates…") { UpdateController.shared.checkForUpdates() }
+                .disabled(!updates.canCheck)
             Divider().frame(width: 200)
             Link("apple/container on GitHub", destination: URL(string: "https://github.com/apple/container")!)
                 .font(.callout)
