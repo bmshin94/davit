@@ -142,7 +142,7 @@ struct ContainerOverviewTab: View {
     var body: some View {
         Group {
             if scrollable {
-                ScrollView { content }
+                ScrollView { content.thinScrollers() }
             } else {
                 content
             }
@@ -460,7 +460,7 @@ struct ContainerStatsTab: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if scrollable {
-            ScrollView { statsContent }
+            ScrollView { statsContent.thinScrollers() }
         } else {
             statsContent
         }

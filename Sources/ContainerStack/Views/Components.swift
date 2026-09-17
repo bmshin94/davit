@@ -429,7 +429,7 @@ struct CardList<Item: Identifiable, Row: View>: View {
 
     var body: some View {
         if scrollable {
-            ScrollView { inner }
+            ScrollView { inner.thinScrollers() }
         } else {
             inner
         }

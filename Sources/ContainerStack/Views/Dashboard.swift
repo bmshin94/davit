@@ -33,7 +33,7 @@ struct DashboardView: View {
     var body: some View {
         Group {
             if scrollable {
-                ScrollView { content }
+                ScrollView { content.thinScrollers() }
             } else {
                 content
             }

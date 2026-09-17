@@ -315,6 +315,7 @@ struct ImageDetailView: View {
                 }
             }
             .padding(16)
+            .thinScrollers()
         }
     }
 }
@@ -397,6 +398,7 @@ struct ImageLayersTab: View {
                         }
                     }
                     .padding(16)
+                    .thinScrollers()
                 }
             } else {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)

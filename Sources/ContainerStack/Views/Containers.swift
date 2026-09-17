@@ -271,7 +271,7 @@ struct ContainerListContent: View {
         if effectiveKey.isEmpty {
             CardList(items: containers, scrollable: scrollable) { row($0) }
         } else if scrollable {
-            ScrollView { grouped }
+            ScrollView { grouped.thinScrollers() }
         } else {
             grouped
         }

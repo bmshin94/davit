@@ -492,7 +492,7 @@ struct MachineOverviewTab: View {
     let machine: MachineRecord
 
     var body: some View {
-        ScrollView { content }
+        ScrollView { content.thinScrollers() }
     }
 
     private var content: some View {
