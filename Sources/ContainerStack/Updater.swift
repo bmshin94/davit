@@ -171,7 +171,32 @@ final class UpdateInstaller: ObservableObject {
         }
 
         progress("Verifying signature…", nil)
-        try await PlatformInstaller.runTool("/usr/bin/codesign", ["--verify", "--strict", "--deep", newApp.path])
+        // `--verify` alone is not enough. It passes for anything signed with our
+        // own Developer ID, notarized or not, so a stolen certificate plus control
+        // of the appcast would be enough to have an arbitrary build installed here
+        // — Gatekeeper never runs on an in-place swap. `-R=notarized` forces a
+        // forged build to have been through Apple's notary service, which leaves a
+        // record and is not something an attacker will do with their own malware.
+        //
+        // Deliberately NOT `stapler validate`: /usr/bin/stapler is an Xcode
+        // command-line-tools shim (it shares an inode with xcodebuild), so on a
+        // machine without developer tools it prompts to install them instead of
+        // validating. /usr/bin/codesign is a real binary on stock macOS.
+        // Preferred over `spctl --assess` because spctl honours a globally
+        // disabled Gatekeeper, and this check should not be one the user can
+        // switch off.
+        do {
+            try await PlatformInstaller.runTool("/usr/bin/codesign", [
+                "--verify", "--strict", "--deep",
+                "-R=notarized", "--check-notarization",
+                newApp.path,
+            ])
+        } catch {
+            throw CLIError(
+                command: "update",
+                message: "refusing to install: the download is not a notarized build "
+                    + "signed by the expected developer (\(error.localizedDescription))")
+        }
         // If the running app has a team identifier, the update must match it.
         let currentTeam = try await teamIdentifier(of: bundleURL.path)
         let newTeam = try await teamIdentifier(of: newApp.path)
